@@ -7,6 +7,7 @@
 
 package org.elasticsearch.xpack.inference.external.response.streaming;
 
+import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayDeque;
 import java.util.Deque;
@@ -28,43 +29,49 @@ public class ServerSentEventParser {
     private static final String TYPE_FIELD = "event";
     private static final String DATA_FIELD = "data";
     private final EventBuffer eventBuffer = new EventBuffer();
-    private volatile String previousTokens = "";
+    private final ByteArrayOutputStream pendingLine = new ByteArrayOutputStream();
+    private boolean previousByteWasCarriageReturn;
 
     public Deque<ServerSentEvent> parse(byte[] bytes) {
         if (bytes == null || bytes.length == 0) {
             return new ArrayDeque<>(0);
         }
 
-        var body = previousTokens + new String(bytes, StandardCharsets.UTF_8);
-        var lines = body.lines();
-
         var collector = new ArrayDeque<ServerSentEvent>();
-        lines.reduce((previousLine, nextLine) -> {
-            var line = previousLine.replace(BOM, "");
-
-            if (line.isEmpty()) {
-                eventBuffer.dispatch().ifPresent(collector::offer);
-            } else if (line.startsWith(":") == false) {
-                if (line.contains(":")) {
-                    fieldValueEvent(line);
-                } else if (DATA_FIELD.equals(line.toLowerCase(Locale.ROOT))) {
-                    eventBuffer.data("");
+        for (byte currentByte : bytes) {
+            if (previousByteWasCarriageReturn) {
+                previousByteWasCarriageReturn = false;
+                if (currentByte == '\n') {
+                    // CRLF is one line ending, including when split across network reads.
+                    continue;
                 }
             }
-            return nextLine;
-        }).ifPresent(lastLine -> {
-            if (lastLine.isEmpty()) {
-                // if the last line is an empty line, then we dispatch the event and clear the previousToken cache
-                eventBuffer.dispatch().ifPresent(collector::offer);
-                previousTokens = "";
+
+            if (currentByte == '\r') {
+                processPendingLine(collector);
+                previousByteWasCarriageReturn = true;
+            } else if (currentByte == '\n') {
+                processPendingLine(collector);
             } else {
-                // we can sometimes get bytes for incomplete messages, so we save them for the next onNext invocation
-                // if we get an onComplete before we clear this cache, we follow the spec to treat it as an incomplete event and discard it
-                // since it was not followed by a blank line
-                previousTokens = lastLine;
+                pendingLine.write(currentByte);
             }
-        });
+        }
         return collector;
+    }
+
+    private void processPendingLine(Deque<ServerSentEvent> collector) {
+        var line = pendingLine.toString(StandardCharsets.UTF_8).replace(BOM, "");
+        pendingLine.reset();
+
+        if (line.isEmpty()) {
+            eventBuffer.dispatch().ifPresent(collector::offer);
+        } else if (line.startsWith(":") == false) {
+            if (line.contains(":")) {
+                fieldValueEvent(line);
+            } else if (DATA_FIELD.equals(line.toLowerCase(Locale.ROOT))) {
+                eventBuffer.data("");
+            }
+        }
     }
 
     private void fieldValueEvent(String lineWithColon) {

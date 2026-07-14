@@ -10,6 +10,8 @@ package org.elasticsearch.xpack.inference.external.response.streaming;
 import org.elasticsearch.test.ESTestCase;
 
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayDeque;
+import java.util.Arrays;
 import java.util.Deque;
 import java.util.List;
 
@@ -152,5 +154,37 @@ public class ServerSentEventParserTests extends ESTestCase {
             """.getBytes(StandardCharsets.UTF_8));
 
         assertEvents(events, List.of(new ServerSentEvent("test")));
+    }
+
+    public void testParsingIsIndependentOfNetworkReadBoundaries() {
+        for (var lineSeparator : List.of("\n", "\r", "\r\n")) {
+            var payload = ("data: first" + lineSeparator + lineSeparator + "data: second" + lineSeparator + lineSeparator).getBytes(
+                StandardCharsets.UTF_8
+            );
+            var expectedEvents = List.of(new ServerSentEvent("first"), new ServerSentEvent("second"));
+
+            for (int splitAt = 1; splitAt < payload.length; splitAt++) {
+                var parser = new ServerSentEventParser();
+                var events = new ArrayDeque<ServerSentEvent>();
+                events.addAll(parser.parse(Arrays.copyOfRange(payload, 0, splitAt)));
+                events.addAll(parser.parse(Arrays.copyOfRange(payload, splitAt, payload.length)));
+
+                assertEvents(events, expectedEvents);
+            }
+        }
+    }
+
+    public void testUtf8CharacterCanBeSplitAcrossNetworkReads() {
+        var payload = "data: こんにちは\n\n".getBytes(StandardCharsets.UTF_8);
+        var expectedEvents = List.of(new ServerSentEvent("こんにちは"));
+
+        for (int splitAt = 1; splitAt < payload.length; splitAt++) {
+            var parser = new ServerSentEventParser();
+            var events = new ArrayDeque<ServerSentEvent>();
+            events.addAll(parser.parse(Arrays.copyOfRange(payload, 0, splitAt)));
+            events.addAll(parser.parse(Arrays.copyOfRange(payload, splitAt, payload.length)));
+
+            assertEvents(events, expectedEvents);
+        }
     }
 }
