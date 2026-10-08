@@ -27,6 +27,7 @@ import software.amazon.awssdk.services.bedrockruntime.model.ToolUseBlockStart;
 
 import org.elasticsearch.ElasticsearchException;
 import org.elasticsearch.common.util.concurrent.EsExecutors;
+import org.elasticsearch.common.util.concurrent.EsRejectedExecutionException;
 import org.elasticsearch.core.Nullable;
 import org.elasticsearch.inference.completion.ReasoningDetail;
 import org.elasticsearch.test.ESTestCase;
@@ -641,6 +642,35 @@ public class AmazonBedrockChatCompletionStreamingProcessorTests extends ESTestCa
 
         verify(downstream).onError(any(UnifiedChatCompletionException.class));
         verify(downstream, never()).onComplete();
+    }
+
+    public void testUpstreamErrorIsDeliveredWhenForkIsRejected() {
+        processor = createProcessor(randomFrom(AmazonBedrockProvider.values()), rejectingExecutor());
+        var upstream = mock(Flow.Subscription.class);
+        processor.onSubscribe(upstream);
+        Flow.Subscriber<StreamingUnifiedChatCompletionResults.Results> downstream = mock();
+        subscribe(downstream).request(1);
+        var expectedError = BedrockRuntimeException.builder().message("ahhhhhh").build();
+
+        processor.onError(expectedError);
+
+        verify(downstream).onError(same(expectedError));
+    }
+
+    public void testProcessingFailureIsDeliveredWhenForkIsRejected() {
+        processor = createProcessor(randomFrom(AmazonBedrockProvider.values()), rejectingExecutor());
+        var upstream = mock(Flow.Subscription.class);
+        processor.onSubscribe(upstream);
+        Flow.Subscriber<StreamingUnifiedChatCompletionResults.Results> downstream = mock();
+        subscribe(downstream).request(1);
+
+        processor.onNext(failingOutput("ahhhhhh"));
+
+        verify(downstream).onError(assertArg(e -> assertThat(e.getMessage(), equalTo("ahhhhhh"))));
+    }
+
+    private static Executor rejectingExecutor() {
+        return command -> { throw new EsRejectedExecutionException("rejected", true); };
     }
 
     /**

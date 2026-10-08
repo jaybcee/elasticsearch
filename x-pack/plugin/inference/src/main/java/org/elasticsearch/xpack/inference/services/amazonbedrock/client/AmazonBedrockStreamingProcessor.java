@@ -88,7 +88,7 @@ abstract class AmazonBedrockStreamingProcessor<T> implements Flow.Processor<Conv
         error.compareAndSet(null, amazonBedrockRuntimeException);
         if (isDone.compareAndSet(false, true) && checkAndResetDemand() && downstreamTerminated.compareAndSet(false, true)) {
             var winner = error.get();
-            runOnUtilityThreadPool(() -> downstream.onError(winner));
+            deliverTerminalOnUtilityThreadPool(() -> downstream.onError(winner));
         }
     }
 
@@ -104,9 +104,10 @@ abstract class AmazonBedrockStreamingProcessor<T> implements Flow.Processor<Conv
     }
 
     /**
-     * Fails the stream because processing an upstream item failed. Unlike {@link #onError}, this does not wait for demand: demand was
-     * reset when the failed item was forked, and downstream is still waiting for the response to its request. The error is recorded and
-     * the terminal signal claimed before upstream is cancelled, so an error the SDK reports for the cancellation cannot replace this one.
+     * Fails the stream because processing an upstream item failed. Unlike {@link #onError}, this delivers without checking demand,
+     * which may or may not have been reset for the failed item: claiming the terminal signal is what ensures downstream receives at
+     * most one. The error is recorded and the terminal signal claimed before upstream is cancelled, so an error the SDK reports for
+     * the cancellation cannot replace this one.
      */
     void failStream(Throwable t) {
         error.compareAndSet(null, t);
@@ -116,7 +117,7 @@ abstract class AmazonBedrockStreamingProcessor<T> implements Flow.Processor<Conv
         }
         if (claimed) {
             var winner = error.get();
-            runOnUtilityThreadPool(() -> downstream.onError(winner));
+            deliverTerminalOnUtilityThreadPool(() -> downstream.onError(winner));
         } else {
             logger.debug("Amazon Bedrock stream already terminated, dropping processing failure", t);
         }
@@ -135,6 +136,19 @@ abstract class AmazonBedrockStreamingProcessor<T> implements Flow.Processor<Conv
             threadPool.executor(UTILITY_THREAD_POOL_NAME).execute(runnable);
         } catch (Exception e) {
             logger.error(Strings.format("failed to fork [%s] to utility thread pool", runnable), e);
+        }
+    }
+
+    /**
+     * The terminal signal has already been claimed when this is called, so nothing else can deliver it. If the fork is rejected,
+     * deliver it on the current thread rather than leaving downstream waiting forever.
+     */
+    private void deliverTerminalOnUtilityThreadPool(Runnable delivery) {
+        try {
+            threadPool.executor(UTILITY_THREAD_POOL_NAME).execute(delivery);
+        } catch (Exception e) {
+            logger.warn("failed to fork terminal signal to utility thread pool, delivering it on the current thread", e);
+            delivery.run();
         }
     }
 
