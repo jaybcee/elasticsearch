@@ -32,6 +32,7 @@ import org.elasticsearch.inference.completion.ReasoningDetail;
 import org.elasticsearch.test.ESTestCase;
 import org.elasticsearch.threadpool.ThreadPool;
 import org.elasticsearch.xpack.core.inference.results.StreamingUnifiedChatCompletionResults;
+import org.elasticsearch.xpack.core.inference.results.UnifiedChatCompletionException;
 import org.elasticsearch.xpack.core.inference.results.completion.ChatCompletionMessageResponse;
 import org.elasticsearch.xpack.core.inference.results.completion.ChatCompletionUsageResponse;
 import org.elasticsearch.xpack.core.inference.results.completion.ChatCompletionUsageResponse.PromptTokensDetails;
@@ -59,6 +60,7 @@ import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.assertArg;
 import static org.mockito.ArgumentMatchers.same;
 import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -465,6 +467,116 @@ public class AmazonBedrockChatCompletionStreamingProcessorTests extends ESTestCa
 
         runAll(queued);
         assertSingleTerminal(downstream, error);
+    }
+
+    public void testProcessingFailureIsDeliveredAndCancelsUpstream() {
+        var upstream = mock(Flow.Subscription.class);
+        processor.onSubscribe(upstream);
+        Flow.Subscriber<StreamingUnifiedChatCompletionResults.Results> downstream = mock();
+        var subscription = subscribe(downstream);
+        subscription.request(1);
+
+        processor.onNext(messageStartOutput("not-a-role"));
+
+        verify(upstream).cancel();
+        verify(downstream).onError(assertArg(e -> {
+            assertThat(e, isA(UnifiedChatCompletionException.class));
+            assertThat(e.getMessage(), equalTo("Received invalid role [not-a-role]"));
+        }));
+        verify(downstream, never()).onNext(any());
+
+        subscription.request(1);
+        verify(upstream, times(1)).request(anyLong());
+        verify(downstream, times(1)).onError(any());
+        verify(downstream, never()).onComplete();
+    }
+
+    public void testProcessingFailureWinsOverErrorFromCancellation() {
+        var upstream = mock(Flow.Subscription.class);
+        doAnswer(ans -> {
+            processor.onError(BedrockRuntimeException.builder().message("cancelled").build());
+            return null;
+        }).when(upstream).cancel();
+        processor.onSubscribe(upstream);
+        Flow.Subscriber<StreamingUnifiedChatCompletionResults.Results> downstream = mock();
+        subscribe(downstream).request(1);
+
+        processor.onNext(messageStartOutput("not-a-role"));
+
+        verify(downstream).onError(any(UnifiedChatCompletionException.class));
+        verify(downstream, times(1)).onError(any());
+        verify(downstream, never()).onComplete();
+    }
+
+    public void testUpstreamErrorAfterProcessingFailureIsDropped() {
+        var upstream = mock(Flow.Subscription.class);
+        processor.onSubscribe(upstream);
+        Flow.Subscriber<StreamingUnifiedChatCompletionResults.Results> downstream = mock();
+        subscribe(downstream).request(1);
+
+        processor.onNext(messageStartOutput("not-a-role"));
+        processor.onError(BedrockRuntimeException.builder().message("ahhhhhh").build());
+        processor.onComplete();
+
+        verify(downstream).onError(any(UnifiedChatCompletionException.class));
+        verify(downstream, times(1)).onError(any());
+        verify(downstream, never()).onComplete();
+    }
+
+    public void testDuplicateProcessingFailuresDeliverTheFirst() {
+        var upstream = mock(Flow.Subscription.class);
+        processor.onSubscribe(upstream);
+        Flow.Subscriber<StreamingUnifiedChatCompletionResults.Results> downstream = mock();
+        subscribe(downstream).request(1);
+
+        processor.onNext(failingOutput("first"));
+        processor.onNext(failingOutput("second"));
+
+        verify(downstream).onError(assertArg(e -> assertThat(e.getMessage(), equalTo("first"))));
+    }
+
+    public void testQueuedEventAfterProcessingFailureSendsNothing() {
+        var queued = new ArrayList<Runnable>();
+        processor = createProcessor(randomFrom(AmazonBedrockProvider.values()), queued::add);
+        var upstream = mock(Flow.Subscription.class);
+        processor.onSubscribe(upstream);
+        Flow.Subscriber<StreamingUnifiedChatCompletionResults.Results> downstream = mock();
+        subscribe(downstream).request(1);
+        runAll(queued);
+
+        processor.onNext(messageStartOutput("assistant"));
+        processor.onNext(failingOutput("ahhhhhh"));
+        runAll(queued);
+
+        verify(downstream, never()).onNext(any());
+        verify(downstream).onError(any(UnifiedChatCompletionException.class));
+    }
+
+    public void testProcessingFailureAfterUpstreamCompletesIsDelivered() {
+        var queued = new ArrayList<Runnable>();
+        processor = createProcessor(randomFrom(AmazonBedrockProvider.values()), queued::add);
+        var upstream = mock(Flow.Subscription.class);
+        processor.onSubscribe(upstream);
+        Flow.Subscriber<StreamingUnifiedChatCompletionResults.Results> downstream = mock();
+        subscribe(downstream).request(1);
+        runAll(queued);
+
+        processor.onNext(messageStartOutput("not-a-role"));
+        processor.onComplete();
+        runAll(queued);
+
+        verify(downstream).onError(any(UnifiedChatCompletionException.class));
+        verify(downstream, never()).onComplete();
+    }
+
+    /**
+     * An output that fails while being processed on the calling thread.
+     */
+    private ConverseStreamOutput failingOutput(String message) {
+        ConverseStreamOutput output = mock();
+        when(output.sdkEventType()).thenReturn(ConverseStreamOutput.EventType.MESSAGE_START);
+        doThrow(new IllegalStateException(message)).when(output).accept(any());
+        return output;
     }
 
     private ConverseStreamOutput skippedDeltaOutput() {

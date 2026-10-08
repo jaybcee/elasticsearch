@@ -103,6 +103,29 @@ abstract class AmazonBedrockStreamingProcessor<T> implements Flow.Processor<Conv
         }
     }
 
+    /**
+     * Fails the stream because processing an upstream item failed. Unlike {@link #onError}, this does not wait for demand: demand was
+     * reset when the failed item was forked, and downstream is still waiting for the response to its request. The error is recorded and
+     * the terminal signal claimed before upstream is cancelled, so an error the SDK reports for the cancellation cannot replace this one.
+     */
+    void failStream(Throwable t) {
+        error.compareAndSet(null, t);
+        var claimed = downstreamTerminated.compareAndSet(false, true);
+        if (upstream != null) {
+            upstream.cancel();
+        }
+        if (claimed) {
+            var winner = error.get();
+            runOnUtilityThreadPool(() -> downstream.onError(winner));
+        } else {
+            logger.debug("Amazon Bedrock stream already terminated, dropping processing failure", t);
+        }
+    }
+
+    boolean isDownstreamTerminated() {
+        return downstreamTerminated.get();
+    }
+
     protected AmazonBedrockStreamingProcessor(ThreadPool threadPool) {
         this.threadPool = threadPool;
     }

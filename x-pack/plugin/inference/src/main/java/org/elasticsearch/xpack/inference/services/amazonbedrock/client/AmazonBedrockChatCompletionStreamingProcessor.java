@@ -93,12 +93,8 @@ class AmazonBedrockChatCompletionStreamingProcessor extends AmazonBedrockStreami
     }
 
     private void handleError(Exception e) {
-        if (upstream != null) {
-            upstream.cancel();
-        }
-
         // Return an error in the unified chat completion format
-        onError(UnifiedChatCompletionException.fromThrowable(e));
+        failStream(UnifiedChatCompletionException.fromThrowable(e));
     }
 
     public void processItem(ConverseStreamOutput item) {
@@ -195,6 +191,10 @@ class AmazonBedrockChatCompletionStreamingProcessor extends AmazonBedrockStreami
     }
 
     private void callDownStreamOnNext(ArrayDeque<ChatCompletionChunkResponse> chunks) {
+        if (isDownstreamTerminated()) {
+            logger.debug("Stream already terminated, dropping [{}] chunks", chunks.size());
+            return;
+        }
         if (chunks.isEmpty() == false && downstream != null) {
             downstream.onNext(new StreamingUnifiedChatCompletionResults.Results(chunks));
         } else if (upstream != null) {
