@@ -54,8 +54,6 @@ abstract class AmazonBedrockStreamingProcessor<T> implements Flow.Processor<Conv
 
     volatile Flow.Subscriber<? super T> downstream;
 
-    private volatile StreamSubscription downstreamSubscription;
-
     @Override
     public void onSubscribe(Flow.Subscription subscription) {
         if (upstream == null) {
@@ -73,23 +71,9 @@ abstract class AmazonBedrockStreamingProcessor<T> implements Flow.Processor<Conv
     public void subscribe(Flow.Subscriber<? super T> subscriber) {
         if (downstream == null) {
             downstream = subscriber;
-            downstreamSubscription = new StreamSubscription();
-            downstream.onSubscribe(downstreamSubscription);
+            downstream.onSubscribe(new StreamSubscription());
         } else {
             subscriber.onError(new IllegalStateException("Subscriber already set."));
-        }
-    }
-
-    /**
-     * Requests the next item for an event that reset demand but produced nothing to send. Going through the downstream subscription
-     * restores that demand, so a completion or error that arrives next is still delivered.
-     */
-    void requestNextOnBehalfOfDownstream() {
-        var subscription = downstreamSubscription;
-        if (subscription != null) {
-            subscription.request(1);
-        } else if (upstream != null) {
-            upstream.request(1);
         }
     }
 
@@ -131,49 +115,58 @@ abstract class AmazonBedrockStreamingProcessor<T> implements Flow.Processor<Conv
         }
     }
 
+    /**
+     * Records demand for {@code n} more items as if downstream had requested them. Subclasses use this when an event they reset demand
+     * for produced nothing to send, so downstream's request is still outstanding. Once upstream has finished, this delivers the
+     * terminal signal instead.
+     */
+    void requestOnBehalfOfDownstream(long n) {
+        if (downstreamTerminated.get()) {
+            return;
+        }
+        demand.updateAndGet(i -> {
+            var sum = i + n;
+            return sum >= 0 ? sum : Long.MAX_VALUE;
+        });
+        if (upstream == null) {
+            // wait for upstream to subscribe before forwarding request
+            return;
+        }
+        if (upstreamIsRunning()) {
+            requestOnMlThread(n);
+        } else if (downstreamTerminated.compareAndSet(false, true)) {
+            var storedError = error.get();
+            if (storedError != null) {
+                downstream.onError(storedError);
+            } else {
+                downstream.onComplete();
+            }
+        }
+    }
+
+    private boolean upstreamIsRunning() {
+        return isDone.get() == false && error.get() == null;
+    }
+
+    private void requestOnMlThread(long n) {
+        var currentThreadPool = EsExecutors.executorName(Thread.currentThread());
+        if (UTILITY_THREAD_POOL_NAME.equalsIgnoreCase(currentThreadPool)) {
+            upstream.request(n);
+        } else {
+            runOnUtilityThreadPool(() -> upstream.request(n));
+        }
+    }
+
     class StreamSubscription implements Flow.Subscription {
         @Override
         public void request(long n) {
-            if (downstreamTerminated.get()) {
-                return;
-            }
             if (n > 0L) {
-                demand.updateAndGet(i -> {
-                    var sum = i + n;
-                    return sum >= 0 ? sum : Long.MAX_VALUE;
-                });
-                if (upstream == null) {
-                    // wait for upstream to subscribe before forwarding request
-                    return;
-                }
-                if (upstreamIsRunning()) {
-                    requestOnMlThread(n);
-                } else if (downstreamTerminated.compareAndSet(false, true)) {
-                    var storedError = error.get();
-                    if (storedError != null) {
-                        downstream.onError(storedError);
-                    } else {
-                        downstream.onComplete();
-                    }
-                }
-            } else {
+                requestOnBehalfOfDownstream(n);
+            } else if (downstreamTerminated.get() == false) {
                 cancel();
                 if (downstreamTerminated.compareAndSet(false, true)) {
                     downstream.onError(new IllegalStateException("Cannot request a negative number."));
                 }
-            }
-        }
-
-        private boolean upstreamIsRunning() {
-            return isDone.get() == false && error.get() == null;
-        }
-
-        private void requestOnMlThread(long n) {
-            var currentThreadPool = EsExecutors.executorName(Thread.currentThread());
-            if (UTILITY_THREAD_POOL_NAME.equalsIgnoreCase(currentThreadPool)) {
-                upstream.request(n);
-            } else {
-                runOnUtilityThreadPool(() -> upstream.request(n));
             }
         }
 
