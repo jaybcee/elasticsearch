@@ -60,8 +60,11 @@ class AmazonBedrockChatCompletionStreamingProcessor extends AmazonBedrockStreami
     private final String conversationId;
     private final String modelId;
     /**
-     * Converse reasoning is only known to be Claude extended thinking when the endpoint's provider is Anthropic, so only then
-     * are reasoning details emitted, labelled like the Anthropic service's. Other providers get the reasoning text alone.
+     * Converse reasoning is only known to be Claude thinking when the endpoint's provider is Anthropic, so only then are reasoning
+     * details emitted, with the same {@code anthropic-claude-v1} format as the Anthropic service. Other providers get the reasoning
+     * text alone. Thinking signatures can be replayed across Claude platforms subject to the compatibility and binding rules in
+     * <a href="https://platform.claude.com/docs/en/build-with-claude/preserved-thinking">preserved thinking</a>. The provider is
+     * declared by the endpoint, so an Anthropic endpoint pointed at a non-Claude model would label its reasoning incorrectly.
      */
     private final boolean emitReasoningDetails;
 

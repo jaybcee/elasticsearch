@@ -354,6 +354,43 @@ public class AmazonBedrockChatCompletionStreamingProcessorTests extends ESTestCa
         );
     }
 
+    public void testAnthropicReasoningDetailsUseAnthropicClaudeFormat() {
+        processor = createProcessor(AmazonBedrockProvider.ANTHROPIC);
+
+        var messages = messagesFrom(
+            contentBlockDeltaOutput(ContentBlockDelta.fromReasoningContent(ReasoningContentBlockDelta.fromText("thinking")), 0),
+            contentBlockDeltaOutput(ContentBlockDelta.fromReasoningContent(ReasoningContentBlockDelta.fromSignature("sig")), 0),
+            contentBlockDeltaOutput(
+                ContentBlockDelta.fromReasoningContent(ReasoningContentBlockDelta.fromRedactedContent(SdkBytes.fromUtf8String("redacted"))),
+                1
+            )
+        );
+
+        assertThat(
+            messages.stream().flatMap(message -> message.reasoningDetails().stream()).map(ReasoningDetail::format).toList(),
+            equalTo(List.of("anthropic-claude-v1", "anthropic-claude-v1", "anthropic-claude-v1"))
+        );
+    }
+
+    public void testNonAnthropicChunksHaveNoReasoningDetails() {
+        processor = createProcessor(
+            randomValueOtherThan(AmazonBedrockProvider.ANTHROPIC, () -> randomFrom(AmazonBedrockProvider.values()))
+        );
+
+        var messages = messagesFrom(
+            contentBlockDeltaOutput(ContentBlockDelta.fromReasoningContent(ReasoningContentBlockDelta.fromText("thinking")), 0),
+            contentBlockDeltaOutput(ContentBlockDelta.fromReasoningContent(ReasoningContentBlockDelta.fromSignature("sig")), 0),
+            contentBlockDeltaOutput(ContentBlockDelta.fromText("answer"), 1),
+            toolUseStartOutput("call", "tool", 2),
+            toolUseDeltaOutput("{}", 2)
+        );
+
+        assertThat(messages.size(), is(4));
+        for (var message : messages) {
+            assertNull(message.reasoningDetails());
+        }
+    }
+
     public void testUnknownReasoningDeltaDoesNotTakeAReasoningIndex() {
         processor = createProcessor(AmazonBedrockProvider.ANTHROPIC);
 
