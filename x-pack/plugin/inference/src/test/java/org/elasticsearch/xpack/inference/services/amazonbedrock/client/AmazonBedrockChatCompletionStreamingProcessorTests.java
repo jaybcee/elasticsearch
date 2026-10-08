@@ -368,6 +368,70 @@ public class AmazonBedrockChatCompletionStreamingProcessorTests extends ESTestCa
         verify(downstream, never()).onError(any());
     }
 
+    public void testErrorThenRequestsDeliversOnlyTheError() {
+        var upstream = mock(Flow.Subscription.class);
+        processor.onSubscribe(upstream);
+        Flow.Subscriber<StreamingUnifiedChatCompletionResults.Results> downstream = mock();
+        var subscription = subscribe(downstream);
+        var expectedError = BedrockRuntimeException.builder().message("ahhhhhh").build();
+
+        processor.onError(expectedError);
+        subscription.request(1);
+        subscription.request(1);
+
+        verify(downstream).onError(same(expectedError));
+        verify(downstream, never()).onComplete();
+    }
+
+    public void testErrorThenCompleteThenRequestsDeliversOnlyTheError() {
+        var upstream = mock(Flow.Subscription.class);
+        processor.onSubscribe(upstream);
+        Flow.Subscriber<StreamingUnifiedChatCompletionResults.Results> downstream = mock();
+        var subscription = subscribe(downstream);
+        var expectedError = BedrockRuntimeException.builder().message("ahhhhhh").build();
+
+        processor.onError(expectedError);
+        processor.onComplete();
+        subscription.request(1);
+        subscription.request(1);
+
+        verify(downstream).onError(same(expectedError));
+        verify(downstream, never()).onComplete();
+    }
+
+    public void testFirstUpstreamErrorWins() {
+        var upstream = mock(Flow.Subscription.class);
+        processor.onSubscribe(upstream);
+        Flow.Subscriber<StreamingUnifiedChatCompletionResults.Results> downstream = mock();
+        var subscription = subscribe(downstream);
+        var firstError = BedrockRuntimeException.builder().message("first").build();
+
+        processor.onError(firstError);
+        processor.onError(BedrockRuntimeException.builder().message("second").build());
+        subscription.request(1);
+
+        verify(downstream).onError(same(firstError));
+        verify(downstream, never()).onComplete();
+    }
+
+    public void testRequestsAfterTerminationAreIgnored() {
+        var upstream = mock(Flow.Subscription.class);
+        processor.onSubscribe(upstream);
+        Flow.Subscriber<StreamingUnifiedChatCompletionResults.Results> downstream = mock();
+        var subscription = subscribe(downstream);
+        subscription.request(1);
+        verify(upstream).request(1);
+
+        processor.onComplete();
+        verify(downstream).onComplete();
+
+        subscription.request(1);
+        subscription.request(-1);
+        verify(upstream, times(1)).request(anyLong());
+        verify(downstream, times(1)).onComplete();
+        verify(downstream, never()).onError(any());
+    }
+
     public void testErrorAfterSkippedEventAndBlockStopIsDelivered() {
         var upstream = mock(Flow.Subscription.class);
         var downstream = subscribedDownstream(upstream);
@@ -400,6 +464,13 @@ public class AmazonBedrockChatCompletionStreamingProcessorTests extends ESTestCa
 
     private ConverseStreamOutput skippedDeltaOutput() {
         return contentBlockDeltaOutput(ContentBlockDelta.fromCitation(CitationsDelta.builder().build()), 0);
+    }
+
+    private Flow.Subscription subscribe(Flow.Subscriber<StreamingUnifiedChatCompletionResults.Results> downstream) {
+        var subscription = ArgumentCaptor.forClass(Flow.Subscription.class);
+        processor.subscribe(downstream);
+        verify(downstream).onSubscribe(subscription.capture());
+        return subscription.getValue();
     }
 
     /**

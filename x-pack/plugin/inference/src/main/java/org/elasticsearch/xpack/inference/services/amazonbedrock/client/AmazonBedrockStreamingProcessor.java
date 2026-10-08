@@ -9,7 +9,6 @@ package org.elasticsearch.xpack.inference.services.amazonbedrock.client;
 
 import software.amazon.awssdk.services.bedrockruntime.model.ConverseStreamOutput;
 
-import org.elasticsearch.ElasticsearchException;
 import org.elasticsearch.ExceptionsHelper;
 import org.elasticsearch.common.Strings;
 import org.elasticsearch.common.util.concurrent.EsExecutors;
@@ -27,8 +26,15 @@ import static org.elasticsearch.xpack.inference.InferencePlugin.UTILITY_THREAD_P
 abstract class AmazonBedrockStreamingProcessor<T> implements Flow.Processor<ConverseStreamOutput, T> {
     private static final Logger logger = LogManager.getLogger(AmazonBedrockStreamingProcessor.class);
 
+    /**
+     * The first error wins: once a stream fails, later errors (for example the SDK reporting the cancellation that followed the
+     * failure) must not replace the one that is delivered downstream.
+     */
     private final AtomicReference<Throwable> error = new AtomicReference<>(null);
-    private final AtomicBoolean onErrorCalled = new AtomicBoolean(false);
+    /**
+     * Claimed by whichever path delivers downstream's terminal signal, so downstream sees at most one onError or onComplete.
+     */
+    private final AtomicBoolean downstreamTerminated = new AtomicBoolean(false);
     private final ThreadPool threadPool;
     /**
      * The purpose of demand is solely to guard against the situation where the bedrock sdk can complete the future before the publisher
@@ -38,8 +44,11 @@ abstract class AmazonBedrockStreamingProcessor<T> implements Flow.Processor<Conv
      * references instead of using a demand variable.
      */
     final AtomicLong demand = new AtomicLong(0);
+    /**
+     * Whether upstream has finished. This is not the same as downstream having received its terminal signal, see
+     * {@link #downstreamTerminated}.
+     */
     final AtomicBoolean isDone = new AtomicBoolean(false);
-    final AtomicBoolean onCompleteCalled = new AtomicBoolean(false);
 
     volatile Flow.Subscription upstream;
 
@@ -84,17 +93,18 @@ abstract class AmazonBedrockStreamingProcessor<T> implements Flow.Processor<Conv
         }
     }
 
+    /**
+     * The original throwable is stored and delivered as is, rather than wrapped, so that callers which look for a specific exception
+     * type (for example {@code UnifiedChatCompletionException.fromThrowable}, which only unwraps
+     * {@link org.elasticsearch.ElasticsearchWrapperException}) still find it.
+     */
     @Override
     public void onError(Throwable amazonBedrockRuntimeException) {
         ExceptionsHelper.maybeDieOnAnotherThread(amazonBedrockRuntimeException);
-        error.set(
-            new ElasticsearchException(
-                Strings.format("AmazonBedrock StreamingChatProcessor failure: [%s]", amazonBedrockRuntimeException.getMessage()),
-                amazonBedrockRuntimeException
-            )
-        );
-        if (isDone.compareAndSet(false, true) && checkAndResetDemand() && onErrorCalled.compareAndSet(false, true)) {
-            runOnUtilityThreadPool(() -> downstream.onError(amazonBedrockRuntimeException));
+        error.compareAndSet(null, amazonBedrockRuntimeException);
+        if (isDone.compareAndSet(false, true) && checkAndResetDemand() && downstreamTerminated.compareAndSet(false, true)) {
+            var winner = error.get();
+            runOnUtilityThreadPool(() -> downstream.onError(winner));
         }
     }
 
@@ -104,7 +114,7 @@ abstract class AmazonBedrockStreamingProcessor<T> implements Flow.Processor<Conv
 
     @Override
     public void onComplete() {
-        if (isDone.compareAndSet(false, true) && checkAndResetDemand() && onCompleteCalled.compareAndSet(false, true)) {
+        if (isDone.compareAndSet(false, true) && checkAndResetDemand() && downstreamTerminated.compareAndSet(false, true)) {
             downstream.onComplete();
         }
     }
@@ -124,6 +134,9 @@ abstract class AmazonBedrockStreamingProcessor<T> implements Flow.Processor<Conv
     class StreamSubscription implements Flow.Subscription {
         @Override
         public void request(long n) {
+            if (downstreamTerminated.get()) {
+                return;
+            }
             if (n > 0L) {
                 demand.updateAndGet(i -> {
                     var sum = i + n;
@@ -135,14 +148,19 @@ abstract class AmazonBedrockStreamingProcessor<T> implements Flow.Processor<Conv
                 }
                 if (upstreamIsRunning()) {
                     requestOnMlThread(n);
-                } else if (error.get() != null && onErrorCalled.compareAndSet(false, true)) {
-                    downstream.onError(error.get());
-                } else if (onCompleteCalled.compareAndSet(false, true)) {
-                    downstream.onComplete();
+                } else if (downstreamTerminated.compareAndSet(false, true)) {
+                    var storedError = error.get();
+                    if (storedError != null) {
+                        downstream.onError(storedError);
+                    } else {
+                        downstream.onComplete();
+                    }
                 }
             } else {
                 cancel();
-                downstream.onError(new IllegalStateException("Cannot request a negative number."));
+                if (downstreamTerminated.compareAndSet(false, true)) {
+                    downstream.onError(new IllegalStateException("Cannot request a negative number."));
+                }
             }
         }
 
