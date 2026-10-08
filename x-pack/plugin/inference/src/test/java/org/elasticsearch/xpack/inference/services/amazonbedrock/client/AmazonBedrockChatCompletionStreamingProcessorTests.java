@@ -354,6 +354,43 @@ public class AmazonBedrockChatCompletionStreamingProcessorTests extends ESTestCa
         );
     }
 
+    public void testUnknownReasoningDeltaDoesNotTakeAReasoningIndex() {
+        processor = createProcessor(AmazonBedrockProvider.ANTHROPIC);
+
+        var messages = messagesFrom(
+            contentBlockDeltaOutput(ContentBlockDelta.fromReasoningContent(ReasoningContentBlockDelta.builder().build()), 0),
+            contentBlockDeltaOutput(ContentBlockDelta.fromReasoningContent(ReasoningContentBlockDelta.fromText("thinking")), 1)
+        );
+
+        assertThat(
+            messages.stream().map(ChatCompletionMessageResponse::reasoningDetails).toList(),
+            equalTo(List.of(List.of(new ReasoningDetail.TextReasoningDetail(ANTHROPIC_CLAUDE_V1_FORMAT, null, 0L, "thinking", null))))
+        );
+    }
+
+    public void testReasoningFragmentsOfOneBlockShareAnIndex() {
+        processor = createProcessor(AmazonBedrockProvider.ANTHROPIC);
+
+        var messages = messagesFrom(
+            contentBlockDeltaOutput(ContentBlockDelta.fromReasoningContent(ReasoningContentBlockDelta.fromSignature("sig")), 0),
+            contentBlockDeltaOutput(ContentBlockDelta.fromReasoningContent(ReasoningContentBlockDelta.fromText("first")), 0),
+            contentBlockDeltaOutput(ContentBlockDelta.fromReasoningContent(ReasoningContentBlockDelta.fromText("second")), 2),
+            contentBlockDeltaOutput(ContentBlockDelta.fromReasoningContent(ReasoningContentBlockDelta.fromText("third")), 0)
+        );
+
+        assertThat(
+            messages.stream().map(ChatCompletionMessageResponse::reasoningDetails).toList(),
+            equalTo(
+                List.of(
+                    List.of(new ReasoningDetail.TextReasoningDetail(ANTHROPIC_CLAUDE_V1_FORMAT, null, 0L, null, "sig")),
+                    List.of(new ReasoningDetail.TextReasoningDetail(ANTHROPIC_CLAUDE_V1_FORMAT, null, 0L, "first", null)),
+                    List.of(new ReasoningDetail.TextReasoningDetail(ANTHROPIC_CLAUDE_V1_FORMAT, null, 1L, "second", null)),
+                    List.of(new ReasoningDetail.TextReasoningDetail(ANTHROPIC_CLAUDE_V1_FORMAT, null, 0L, "third", null))
+                )
+            )
+        );
+    }
+
     public void testToolUseDeltaWithoutStartIsSkipped() {
         var messages = messagesFrom(toolUseDeltaOutput("{}", 1));
 

@@ -404,22 +404,32 @@ class AmazonBedrockChatCompletionStreamingProcessor extends AmazonBedrockStreami
             return type == ReasoningContentBlockDelta.Type.TEXT ? reasoningMessage(reasoning.text(), null) : null;
         }
 
-        // Converse sends no content block start for reasoning, so the first delta of a block assigns its reasoning index.
-        long reasoningIdx = contentBlockIndexToReasoningIndex.computeIfAbsent(contentBlockIndex, k -> reasoningBlockCount++);
         return switch (type) {
             case ReasoningContentBlockDelta.Type.TEXT -> reasoningMessage(
                 reasoning.text(),
-                new ReasoningDetail.TextReasoningDetail(ANTHROPIC_CLAUDE_V1_FORMAT, null, reasoningIdx, reasoning.text(), null)
+                new ReasoningDetail.TextReasoningDetail(
+                    ANTHROPIC_CLAUDE_V1_FORMAT,
+                    null,
+                    reasoningIndex(contentBlockIndex),
+                    reasoning.text(),
+                    null
+                )
             );
             case ReasoningContentBlockDelta.Type.SIGNATURE -> reasoningMessage(
                 null,
-                new ReasoningDetail.TextReasoningDetail(ANTHROPIC_CLAUDE_V1_FORMAT, null, reasoningIdx, null, reasoning.signature())
+                new ReasoningDetail.TextReasoningDetail(
+                    ANTHROPIC_CLAUDE_V1_FORMAT,
+                    null,
+                    reasoningIndex(contentBlockIndex),
+                    null,
+                    reasoning.signature()
+                )
             );
             case ReasoningContentBlockDelta.Type.REDACTED_CONTENT -> {
                 var data = Base64.getEncoder().encodeToString(reasoning.redactedContent().asByteArray());
                 yield reasoningMessage(
                     null,
-                    new ReasoningDetail.EncryptedReasoningDetail(ANTHROPIC_CLAUDE_V1_FORMAT, null, reasoningIdx, data)
+                    new ReasoningDetail.EncryptedReasoningDetail(ANTHROPIC_CLAUDE_V1_FORMAT, null, reasoningIndex(contentBlockIndex), data)
                 );
             }
             case ReasoningContentBlockDelta.Type.UNKNOWN_TO_SDK_VERSION -> {
@@ -431,6 +441,13 @@ class AmazonBedrockChatCompletionStreamingProcessor extends AmazonBedrockStreami
 
     private static ChatCompletionMessageResponse reasoningMessage(@Nullable String reasoning, @Nullable ReasoningDetail detail) {
         return new ChatCompletionMessageResponse(null, null, null, null, reasoning, detail == null ? null : List.of(detail));
+    }
+
+    /**
+     * Converse sends no content block start for reasoning, so the first recognized delta of a block assigns its reasoning index.
+     */
+    private long reasoningIndex(int contentBlockIndex) {
+        return contentBlockIndexToReasoningIndex.computeIfAbsent(contentBlockIndex, k -> reasoningBlockCount++);
     }
 
     /**
