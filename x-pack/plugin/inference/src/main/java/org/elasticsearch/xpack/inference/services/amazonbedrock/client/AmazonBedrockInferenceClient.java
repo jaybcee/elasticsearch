@@ -111,7 +111,8 @@ public class AmazonBedrockInferenceClient extends AmazonBedrockBaseClient {
             request,
             ConverseStreamResponseHandler.builder().subscriber(() -> FlowAdapters.toSubscriber(awsResponseProcessor)).build()
         ).exceptionally(e -> {
-            awsResponseProcessor.onError(e);
+            // the SDK wraps failures in a CompletionException, which would otherwise hide the Bedrock error from the client
+            awsResponseProcessor.onError(e instanceof CompletionException && e.getCause() != null ? e.getCause() : e);
             return null; // return value ignored
         });
         return awsResponseProcessor;

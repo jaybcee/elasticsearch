@@ -10,6 +10,8 @@ package org.elasticsearch.xpack.inference.services.amazonbedrock.client;
 import software.amazon.awssdk.services.bedrockruntime.BedrockRuntimeAsyncClient;
 import software.amazon.awssdk.services.bedrockruntime.model.ConverseRequest;
 import software.amazon.awssdk.services.bedrockruntime.model.ConverseResponse;
+import software.amazon.awssdk.services.bedrockruntime.model.ConverseStreamRequest;
+import software.amazon.awssdk.services.bedrockruntime.model.ConverseStreamResponseHandler;
 import software.amazon.awssdk.services.bedrockruntime.model.InvokeModelRequest;
 import software.amazon.awssdk.services.bedrockruntime.model.InvokeModelResponse;
 
@@ -31,6 +33,7 @@ import static org.mockito.Mockito.when;
 public class AmazonBedrockMockInferenceClient extends AmazonBedrockInferenceClient {
     private CompletableFuture<ConverseResponse> converseResponseFuture = CompletableFuture.completedFuture(null);
     private CompletableFuture<InvokeModelResponse> invokeModelResponseFuture = CompletableFuture.completedFuture(null);
+    private final CompletableFuture<Void> converseStreamFuture = new CompletableFuture<>();
 
     public static AmazonBedrockMockInferenceClient create(AmazonBedrockModel model, @Nullable TimeValue timeout) {
         return new AmazonBedrockMockInferenceClient(model, timeout);
@@ -63,11 +66,20 @@ public class AmazonBedrockMockInferenceClient extends AmazonBedrockInferenceClie
         this.invokeModelResponseFuture = CompletableFuture.completedFuture(result);
     }
 
+    /**
+     * The future returned by every converseStream call. It never completes unless the test completes it.
+     */
+    public CompletableFuture<Void> converseStreamFuture() {
+        return converseStreamFuture;
+    }
+
     @Override
     protected BedrockRuntimeAsyncClient createAmazonBedrockClient(AmazonBedrockModel model, @Nullable TimeValue timeout) {
         var runtimeClient = mock(BedrockRuntimeAsyncClient.class);
         doAnswer(invocation -> invokeModelResponseFuture).when(runtimeClient).invokeModel(any(InvokeModelRequest.class));
         doAnswer(invocation -> converseResponseFuture).when(runtimeClient).converse(any(ConverseRequest.class));
+        doAnswer(invocation -> converseStreamFuture).when(runtimeClient)
+            .converseStream(any(ConverseStreamRequest.class), any(ConverseStreamResponseHandler.class));
 
         return runtimeClient;
     }
