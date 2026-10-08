@@ -12,6 +12,7 @@ import software.amazon.awssdk.services.bedrockruntime.model.ContentBlockDelta;
 import software.amazon.awssdk.services.bedrockruntime.model.ContentBlockDeltaEvent;
 import software.amazon.awssdk.services.bedrockruntime.model.ConverseStreamOutput;
 import software.amazon.awssdk.services.bedrockruntime.model.ConverseStreamResponseHandler;
+import software.amazon.awssdk.services.bedrockruntime.model.ReasoningContentBlockDelta;
 
 import org.elasticsearch.ElasticsearchException;
 import org.elasticsearch.common.util.concurrent.EsExecutors;
@@ -35,6 +36,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.assertArg;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.same;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -146,12 +148,69 @@ public class AmazonBedrockCompletionStreamingProcessorTests extends ESTestCase {
         verify(upstream, times(0)).request(anyLong());
     }
 
+    public void testReasoningDeltaThenTextForwardsOnlyText() {
+        var upstream = mock(Flow.Subscription.class);
+        processor.onSubscribe(upstream);
+        Flow.Subscriber<StreamingCompletionResults.Results> downstream = mock();
+        subscribe(downstream).request(1);
+
+        processor.onNext(reasoningOutput());
+        verify(downstream, never()).onNext(any());
+        verify(upstream, times(2)).request(1);
+
+        processor.onNext(output("answer"));
+        verifyText(downstream, "answer");
+    }
+
+    public void testErrorAfterReasoningDeltaIsDelivered() {
+        var upstream = mock(Flow.Subscription.class);
+        processor.onSubscribe(upstream);
+        Flow.Subscriber<StreamingCompletionResults.Results> downstream = mock();
+        subscribe(downstream).request(1);
+        var expectedError = BedrockRuntimeException.builder().message("ahhhhhh").build();
+
+        processor.onNext(reasoningOutput());
+        processor.onError(expectedError);
+
+        verify(downstream).onError(same(expectedError));
+        verify(downstream, never()).onNext(any());
+        verify(downstream, never()).onComplete();
+    }
+
+    public void testCompletionAfterReasoningDeltaIsDelivered() {
+        var upstream = mock(Flow.Subscription.class);
+        processor.onSubscribe(upstream);
+        Flow.Subscriber<StreamingCompletionResults.Results> downstream = mock();
+        subscribe(downstream).request(1);
+
+        processor.onNext(reasoningOutput());
+        processor.onComplete();
+
+        verify(downstream).onComplete();
+        verify(downstream, never()).onNext(any());
+        verify(downstream, never()).onError(any());
+    }
+
+    private Flow.Subscription subscribe(Flow.Subscriber<StreamingCompletionResults.Results> downstream) {
+        var subscription = ArgumentCaptor.forClass(Flow.Subscription.class);
+        processor.subscribe(downstream);
+        verify(downstream).onSubscribe(subscription.capture());
+        return subscription.getValue();
+    }
+
+    private ConverseStreamOutput reasoningOutput() {
+        return output(ContentBlockDelta.fromReasoningContent(ReasoningContentBlockDelta.fromText("thinking")));
+    }
+
     private ConverseStreamOutput output(String text) {
+        return output(ContentBlockDelta.fromText(text));
+    }
+
+    private ConverseStreamOutput output(ContentBlockDelta delta) {
         ConverseStreamOutput output = mock();
         when(output.sdkEventType()).thenReturn(ConverseStreamOutput.EventType.CONTENT_BLOCK_DELTA);
         doAnswer(ans -> {
             ConverseStreamResponseHandler.Visitor visitor = ans.getArgument(0);
-            ContentBlockDelta delta = ContentBlockDelta.fromText(text);
             ContentBlockDeltaEvent event = ContentBlockDeltaEvent.builder().delta(delta).build();
             visitor.visitContentBlockDelta(event);
             return null;
